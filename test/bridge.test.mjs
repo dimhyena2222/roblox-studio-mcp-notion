@@ -36,7 +36,7 @@ function fakeUpstream() {
 }
 async function fixture(t, config = {}, upstream = fakeUpstream()) {
   let stopped = 0;
-  const bridge = await startBridge({ port: 0, token, readOnly: false, ...config }, async () => { stopped++; }, async () => upstream);
+  const bridge = await startBridge({ port: 0, token, allowWrites: true, ...config }, async () => { stopped++; }, async () => upstream);
   t.after(() => bridge.stop());
   const base = `http://127.0.0.1:${bridge.port}`;
   const clients = [];
@@ -96,12 +96,15 @@ test('content images, structured output and metadata are forwarded intact', asyn
   assert.deepEqual(f.upstream.calls, [{ name: 'screen_capture', args: { studio_id: 'chosen-studio' } }]);
 });
 
-test('readOnly mode omits all writes and never forwards an attempted write', async t => {
-  const f = await fixture(t, { readOnly: true });
+test('missing write opt-in stays read-only even with the legacy readOnly false setting', async t => {
+  const f = await fixture(t, { allowWrites: undefined, readOnly: false });
   const client = await f.connect();
+  assert.equal((await (await f.request('/_status')).json()).readOnly, true);
   assert.deepEqual((await client.listTools()).tools.map(value => value.name).sort(), reads.map(name => `roblox_${name}`).sort());
-  const result = await client.callTool({ name: 'roblox_execute_luau', arguments: { studio_id: 'chosen-studio' } });
-  assert.equal(result.isError, true);
+  for (const name of writes) {
+    const result = await client.callTool({ name: `roblox_${name}`, arguments: { studio_id: 'chosen-studio' } });
+    assert.equal(result.isError, true);
+  }
   assert.equal(f.upstream.calls.length, 0);
 });
 
@@ -147,17 +150,33 @@ test('invalid JSON, too-large body and wrong MCP method return actionable HTTP e
   assert.equal(f.upstream.calls.length, 0);
 });
 
+test('large tool argument collections are rejected even below the HTTP body limit', async t => {
+  const upstream = fakeUpstream();
+  const definition = tool('multi_edit');
+  definition.inputSchema.properties.edits = { type: 'array', items: { type: 'string' } };
+  upstream.tools = [definition];
+  const f = await fixture(t, {}, upstream);
+  const client = await f.connect();
+  const call = edits => client.callTool({ name: 'roblox_multi_edit', arguments: { studio_id: 'chosen', edits } });
+  const rejected = await call(Array(10_001).fill('x'));
+  assert.equal(rejected.isError, true);
+  assert.match(rejected.content[0].text, /element/i);
+  assert.equal(upstream.calls.length, 0);
+  assert.equal((await call(['x'])).isError, undefined);
+  assert.equal(upstream.calls.length, 1);
+});
+
 test('unsupported upstream schemas fail closed and close the official connection', async () => {
   const upstream = fakeUpstream();
   upstream.tools = [{ ...tool('execute_luau'), inputSchema: { type: 'object', if: { properties: { studio_id: { const: 'wrong' } } }, then: { required: ['studio_id'] } } }];
-  await assert.rejects(startBridge({ port: 0, token }, async () => {}, async () => upstream), /Unsupported.*schema/i);
+  await assert.rejects(startBridge({ port: 0, token, allowWrites: true }, async () => {}, async () => upstream), /Unsupported.*schema/i);
   assert.equal(upstream.closed, true);
 });
 
 test('selected-place tools fail closed if an upstream update makes studio_id optional', async () => {
   const upstream = fakeUpstream();
   upstream.tools = [{ ...tool('execute_luau'), inputSchema: { type: 'object', properties: { studio_id: { type: 'string' } } } }];
-  await assert.rejects(startBridge({ port: 0, token }, async () => {}, async () => upstream), /required string studio_id/);
+  await assert.rejects(startBridge({ port: 0, token, allowWrites: true }, async () => {}, async () => upstream), /required string studio_id/);
   assert.equal(upstream.closed, true);
 });
 

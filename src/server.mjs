@@ -14,6 +14,7 @@ const coreNames = new Set([...READ_ONLY_TOOLS, ...WRITE_TOOLS]);
 const readNames = new Set(READ_ONLY_TOOLS);
 const origins = new Set(['https://app.notion.com', 'https://www.notion.so', 'https://notion.so']);
 const BODY_LIMIT = 1024 * 1024;
+const MAX_TOOL_INPUT_ELEMENTS = 10_000;
 const QUEUE_TIMEOUT = 120_000;
 
 // Unrecognized JSON Schema validation keywords must not silently become Zod metadata.
@@ -114,6 +115,7 @@ export async function startBridge(config, onStopped = async () => {}, upstreamFa
   if (typeof config.token !== 'string' || config.token.length < 32) throw new Error('A locally generated MCP token of at least 32 characters is required.');
   if (!Number.isInteger(config.port) || config.port < 0 || config.port > 65535) throw new Error('MCP port must be an integer from 0 to 65535.');
   const upstream = await upstreamFactory(config);
+  const readOnlyMode = config.allowWrites !== true;
   let stopping = false, stopPromise;
   let schemaSignature, prepared = [];
   let schemaError;
@@ -125,7 +127,7 @@ export async function startBridge(config, onStopped = async () => {}, upstreamFa
     const signature = JSON.stringify(tools);
     if (signature !== schemaSignature) {
       try {
-        const next = prepareTools(tools, config.readOnly === true);
+        const next = prepareTools(tools, readOnlyMode);
         prepared = next; schemaSignature = signature; schemaError = undefined;
       } catch (error) { schemaError = error; throw error; }
     }
@@ -169,7 +171,7 @@ export async function startBridge(config, onStopped = async () => {}, upstreamFa
       if (pathname === '/_status' || pathname === '/_shutdown') {
         const proxied = Object.keys(request.headers).some(name => name === 'forwarded' || name.startsWith('cf-') || name.startsWith('x-forwarded-'));
         if (!authorized || proxied) return json(response, 403, { error: 'Authenticated local management only.' });
-        if (pathname === '/_status' && request.method === 'GET') return json(response, healthy() ? 200 : 503, { server: 'notion-roblox-studio', ok: !!healthy(), readOnly: config.readOnly === true });
+        if (pathname === '/_status' && request.method === 'GET') return json(response, healthy() ? 200 : 503, { server: 'notion-roblox-studio', ok: !!healthy(), readOnly: readOnlyMode });
         if (pathname === '/_shutdown' && request.method === 'POST') {
           json(response, 200, { stopping: true });
           setImmediate(() => { void stop().catch(() => { process.exitCode = 1; }); });
@@ -183,7 +185,9 @@ export async function startBridge(config, onStopped = async () => {}, upstreamFa
       if (!upstream.ready || stopping) return json(response, 503, { error: `Official Studio MCP is unavailable. ${STUDIO_GUIDANCE}` });
       const body = await readJson(request);
       const currentTools = await refreshTools();
-      const server = new McpServer({ name: 'notion-roblox-studio', version: '1.0.0' }, { instructions: STUDIO_GUIDANCE });
+      const server = new McpServer({ name: 'notion-roblox-studio', version: '1.0.0' }, {
+        instructions: STUDIO_GUIDANCE, maxToolInputElements: MAX_TOOL_INPUT_ELEMENTS,
+      });
       for (const { definition, input, output } of currentTools) {
         const readOnly = readNames.has(definition.name);
         server.registerTool(`roblox_${definition.name}`, {

@@ -27,7 +27,7 @@ export async function loadConfig() {
   try { config = JSON.parse(await readFile(configPath, 'utf8')); }
   catch (error) {
     if (error.code !== 'ENOENT') throw error;
-    config = { token: randomBytes(32).toString('hex'), port: 8769, readOnly: false };
+    config = { token: randomBytes(32).toString('hex'), port: 8769, allowWrites: false };
     try { await writeFile(configPath, JSON.stringify(config, null, 2), { flag: 'wx', mode: 0o600 }); }
     catch (writeError) {
       if (writeError.code !== 'EEXIST') throw writeError;
@@ -36,9 +36,12 @@ export async function loadConfig() {
   }
   if (!/^[a-f0-9]{64}$/.test(config.token)) throw new Error('Invalid key in .runtime/config.json');
   if (!Number.isInteger(config.port) || config.port < 1024 || config.port > 65535) throw new Error('Invalid HTTP port');
-  if (typeof config.readOnly !== 'boolean') throw new Error('readOnly must be true or false');
+  if (config.allowWrites !== undefined && typeof config.allowWrites !== 'boolean') {
+    throw new Error('allowWrites must be true or false');
+  }
   const batch = await findStudioBatch();
-  return { ...config, studioCommand: process.env.ComSpec || 'cmd.exe', studioArgs: ['/d', '/c', batch] };
+  return { ...config, readOnly: config.allowWrites !== true,
+    studioCommand: process.env.ComSpec || 'cmd.exe', studioArgs: ['/d', '/c', batch] };
 }
 
 export async function findCloudflared() {
